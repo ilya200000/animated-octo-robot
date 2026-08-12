@@ -201,7 +201,7 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
                                 }
                             }
                         }
-                    } catch (SocketTimeoutException | InterruptedException ignored) {
+                    } catch (SocketTimeoutException ignored) {
                     } catch (IOException e) {
                         if (listening) {
                             getLogger().warning("Error handling sync client: " + e.getMessage());
