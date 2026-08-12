@@ -209,25 +209,6 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
                     return true;
                 }
 
-                if (args[0].equalsIgnoreCase("give") && args.length >= 3) {
-                    if (!player.hasPermission("bost.admin")) {
-                        player.sendMessage("§cУ вас нет прав!");
-                        return true;
-                    }
-                    String targetName = args[1];
-                    int amount;
-                    try {
-                        amount = Integer.parseInt(args[2]);
-                    } catch (Exception e) {
-                        player.sendMessage("§cНеверная сумма!");
-                        return true;
-                    }
-
-                    addBalance(targetName, amount);
-                    player.sendMessage("§aВы выдали " + amount + " монет игроку §e" + targetName + "§a!");
-                    return true;
-                }
-
                 if (args[0].equalsIgnoreCase("take") && args.length >= 3) {
                     if (!player.hasPermission("bost.admin")) {
                         player.sendMessage("§cУ вас нет прав!");
@@ -250,7 +231,7 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
                 }
             }
 
-            player.sendMessage("§cИспользование: /bust [balance|join|pay|give|take] ...");
+            player.sendMessage("§cИспользование: /bust [balance|join|pay|take] ...");
             return true;
         }
 
@@ -261,7 +242,7 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (command.getName().equalsIgnoreCase("bust")) {
             if (args.length == 1) {
-                return Arrays.asList("balance", "join", "pay", "give", "take");
+                return Arrays.asList("balance", "join", "pay", "take");
             }
             if (args.length == 2) {
                 if (args[0].equalsIgnoreCase("join") || args[0].equalsIgnoreCase("pay")) {
