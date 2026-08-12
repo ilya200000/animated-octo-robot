@@ -2,41 +2,84 @@ package com.bost.plugin;
 
 import me.clip.placeholderapi.expansion.PlaceholderExpansion;
 import org.bukkit.Bukkit;
-import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
 import org.bukkit.entity.Player;
+import org.bukkit.plugin.java.JavaPlugin;
 import org.jetbrains.annotations.NotNull;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.io.*;
 import java.net.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public class BostPlugin extends JavaPlugin implements TabCompleter {
 
-    // Секретный токен для межсерверной защиты (должен быть одинаковым на всех серверах сети!)
-    private static final String SECRET_TOKEN = "BostSecretKey_2026_SecureSync";
+    private static final Pattern NAME_PATTERN = Pattern.compile("^[a-zA-Z0-9_]{3,16}$");
+    private static final long MAX_TIME_DIFF = 5000;
+    private static final String DEFAULT_SECRET_KEY = "BustDefaultSecret_ChangeMe_2026";
 
-    private Map<String, InetSocketAddress> servers = new HashMap<>();
-    private Map<String, Integer> syncPorts = new HashMap<>();
+    // =========================================================================
+    // ЖЕСТКО ЗАШИТЫЕ 5 СЕРВЕРОВ СЕТИ (lobby, survival и 3 дополнительных)
+    // =========================================================================
+    private static final Map<String, InetSocketAddress> HARDCODED_SERVERS = Map.of(
+            "lobby", new InetSocketAddress("localhost", 25565),
+            "survival", new InetSocketAddress("localhost", 25566),
+            "grief", new InetSocketAddress("localhost", 25567),
+            "minigames", new InetSocketAddress("localhost", 25568),
+            "creative", new InetSocketAddress("localhost", 25569)
+    );
+
+    private static final Map<String, Integer> HARDCODED_SYNC_PORTS = Map.of(
+            "lobby", 16544,
+            "survival", 16545,
+            "grief", 16546,
+            "minigames", 16547,
+            "creative", 16548
+    );
+    // =========================================================================
+
+    // Кем себя считает этот конкретный сервер (поменяй на "survival", "grief" и т.д. перед компиляцией)
+    private static final String CURRENT_SERVER_NAME = "lobby";
+
+    private final ConcurrentHashMap<String, Integer> balanceCache = new ConcurrentHashMap<>();
+    private final ReentrantLock globalLock = new ReentrantLock();
+    
+    private final ThreadPoolExecutor executor = new ThreadPoolExecutor(
+            2, 4, 30L, TimeUnit.SECONDS,
+            new ArrayBlockingQueue<>(50),
+            r -> new Thread(r, "Bust-Async-Worker"),
+            new ThreadPoolExecutor.CallerRunsPolicy()
+    );
+    
+    private String secretKey;
     private File ecoFile;
     private ServerSocket socketServer;
-    private boolean listening = true;
+    private volatile boolean listening = true;
 
     @Override
     public void onEnable() {
-        servers.put("survival", new InetSocketAddress("127.0.0.1", 15544));
-        servers.put("rpg", new InetSocketAddress("127.0.0.1", 15545));
-
-        syncPorts.put("survival", 16544);
-        syncPorts.put("rpg", 16545);
+        this.secretKey = DEFAULT_SECRET_KEY;
 
         if (!getDataFolder().exists()) getDataFolder().mkdir();
         ecoFile = new File(getDataFolder(), "economy.txt");
 
-        getCommand("bust").setTabCompleter(this);
+        loadBalancesIntoMemory();
+
+        if (getCommand("bust") != null) {
+            getCommand("bust").setTabCompleter(this);
+        }
 
         startSyncServer();
 
@@ -45,208 +88,335 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
             getLogger().info("PlaceholderAPI expansion registered successfully!");
         }
 
-        getLogger().info("BOST SECURE ECONOMY & TRANSFER GATEWAY INITIALIZED");
+        getLogger().info("BUST SECURE ECONOMY INITIALIZED. Server ID: [" + CURRENT_SERVER_NAME + "]");
     }
 
     @Override
     public void onDisable() {
         listening = false;
+        executor.shutdownNow();
         try {
-            if (socketServer != null) socketServer.close();
-        } catch (IOException ignored) {}
+            if (socketServer != null && !socketServer.isClosed()) {
+                socketServer.close();
+            }
+        } catch (IOException e) {
+            getLogger().warning("Failed to close sync server socket: " + e.getMessage());
+        }
+        saveBalancesToDisk();
+    }
+
+    private void loadBalancesIntoMemory() {
+        if (!ecoFile.exists()) return;
+        globalLock.lock();
+        try (BufferedReader reader = new BufferedReader(new FileReader(ecoFile, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String[] parts = line.split(":", 2);
+                if (parts.length == 2) {
+                    try {
+                        balanceCache.put(parts[0], Integer.parseInt(parts[1]));
+                    } catch (NumberFormatException ignored) {}
+                }
+            }
+        } catch (IOException ignored) {
+        } finally {
+            globalLock.unlock();
+        }
+    }
+
+    private void saveBalancesToDisk() {
+        globalLock.lock();
+        try {
+            File tempFile = new File(getDataFolder(), "economy.tmp");
+            try (PrintWriter writer = new PrintWriter(new FileWriter(tempFile, StandardCharsets.UTF_8))) {
+                for (Map.Entry<String, Integer> entry : balanceCache.entrySet()) {
+                    writer.println(entry.getKey() + ":" + entry.getValue());
+                }
+            }
+            Files.move(tempFile.toPath(), ecoFile.toPath(), 
+                    StandardCopyOption.REPLACE_EXISTING, 
+                    StandardCopyOption.ATOMIC_MOVE);
+        } catch (IOException e) {
+            getLogger().warning("Failed to save economy to disk: " + e.getMessage());
+        } finally {
+            globalLock.unlock();
+        }
     }
 
     private void startSyncServer() {
-        int myPort = (getServer().getPort() == 15545) ? 16545 : 16544;
+        Integer mySyncPort = HARDCODED_SYNC_PORTS.get(CURRENT_SERVER_NAME.toLowerCase());
+        if (mySyncPort == null) {
+            getLogger().severe("CRITICAL: Sync port for server '" + CURRENT_SERVER_NAME + "' is not defined!");
+            return;
+        }
 
         new Thread(() -> {
             try {
-                socketServer = new ServerSocket(myPort);
+                socketServer = new ServerSocket(mySyncPort);
+                getLogger().info("Secure sync server started successfully on port " + mySyncPort);
+                
                 while (listening) {
-                    Socket clientSocket = socketServer.accept();
-                    BufferedReader reader = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
-                    String message = reader.readLine();
-                    clientSocket.close();
+                    try (Socket clientSocket = socketServer.accept()) {
+                        InetAddress clientAddr = clientSocket.getInetAddress();
+                        if (!clientAddr.isLoopbackAddress()) {
+                            continue;
+                        }
 
-                    if (message != null) {
-                        // Формат: TOKEN:ECO:Игрок:Баланс
-                        String[] parts = message.split(":", 4);
-                        if (parts.length >= 4 && parts[0].equals(SECRET_TOKEN)) {
-                            if (parts[1].equals("ECO")) {
-                                setBalanceInternal(parts[2], Integer.parseInt(parts[3]));
+                        clientSocket.setSoTimeout(3000);
+                        
+                        BufferedReader reader = new BufferedReader(new InputStreamReader(clientSocket.getInputStream(), StandardCharsets.UTF_8));
+                        String message = reader.readLine();
+
+                        if (message == null || message.isEmpty()) continue;
+                        message = message.trim();
+
+                        String[] parts = message.split(":", 5);
+                        if (parts.length >= 5) {
+                            String receivedSign = parts[0];
+                            String dataToSign = parts[1] + ":" + parts[2] + ":" + parts[3] + ":" + parts[4];
+                            
+                            if (verifySignature(dataToSign, receivedSign)) {
+                                try {
+                                    long packetTime = Long.parseLong(parts[4]);
+                                    if (Math.abs(System.currentTimeMillis() - packetTime) > MAX_TIME_DIFF) {
+                                        continue; 
+                                    }
+                                } catch (NumberFormatException e) {
+                                    continue;
+                                }
+
+                                if (parts[1].equals("ECO")) {
+                                    String playerName = parts[2];
+                                    if (NAME_PATTERN.matcher(playerName).matches()) {
+                                        int remoteBalance = Integer.parseInt(parts[3]);
+                                        
+                                        globalLock.lock();
+                                        try {
+                                            balanceCache.put(playerName, remoteBalance);
+                                            saveBalancesToDisk();
+                                        } finally {
+                                            globalLock.unlock();
+                                        }
+                                    }
+                                }
                             }
+                        }
+                    } catch (SocketTimeoutException | InterruptedException ignored) {
+                    } catch (IOException e) {
+                        if (listening) {
+                            getLogger().warning("Error handling sync client: " + e.getMessage());
                         }
                     }
                 }
-            } catch (IOException ignored) {}
-        }).start();
+            } catch (IOException e) {
+                getLogger().warning("Could not start sync server on port " + mySyncPort + ": " + e.getMessage());
+            }
+        }, "Bust-Sync-Server-Thread").start();
     }
 
     private void sendBalanceToOtherServers(String playerName, int balance) {
-        for (String serverKey : servers.keySet()) {
-            Integer port = syncPorts.get(serverKey);
-            if (port == null) continue;
+        long timestamp = System.currentTimeMillis();
+        String dataToSign = "ECO:" + playerName + ":" + balance + ":" + timestamp;
+        String signature = signData(dataToSign);
+        String payload = signature + ":" + dataToSign;
 
-            new Thread(() -> {
-                try (Socket socket = new Socket("127.0.0.1", port);
-                     PrintWriter writer = new PrintWriter(socket.getOutputStream(), true)) {
-                    // Отправляем пакет вместе с токеном
-                    writer.println(SECRET_TOKEN + ":ECO:" + playerName + ":" + balance);
+        for (Map.Entry<String, Integer> entry : HARDCODED_SYNC_PORTS.entrySet()) {
+            String targetServer = entry.getKey();
+            int port = entry.getValue();
+
+            if (targetServer.equalsIgnoreCase(CURRENT_SERVER_NAME)) continue;
+
+            executor.submit(() -> {
+                try (Socket socket = new Socket()) {
+                    socket.connect(new InetSocketAddress("127.0.0.1", port), 2000);
+                    socket.setSoTimeout(2000);
+                    try (PrintWriter writer = new PrintWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8), true)) {
+                        writer.println(payload);
+                    }
                 } catch (IOException ignored) {}
-            }).start();
+            });
         }
+    }
+
+    private String signData(String data) {
+        try {
+            Mac sha256_HMAC = Mac.getInstance("HmacSHA256");
+            SecretKeySpec secret_key = new SecretKeySpec(secretKey.getBytes(StandardCharsets.UTF_8), "HmacSHA256");
+            sha256_HMAC.init(secret_key);
+            byte[] hash = sha256_HMAC.doFinal(data.getBytes(StandardCharsets.UTF_8));
+            StringBuilder hexString = new StringBuilder();
+            for (byte b : hash) {
+                String hex = Integer.toHexString(0xff & b);
+                if (hex.length() == 1) hexString.append('0');
+                hexString.append(hex);
+            }
+            return hexString.toString();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private boolean verifySignature(String data, String signature) {
+        String expected = signData(data);
+        if (expected.isEmpty()) return false;
+        return MessageDigest.isEqual(
+                expected.getBytes(StandardCharsets.UTF_8), 
+                signature.getBytes(StandardCharsets.UTF_8)
+        );
     }
 
     public int getBalance(String playerName) {
-        if (!ecoFile.exists()) return 0;
-        try (BufferedReader reader = new BufferedReader(new FileReader(ecoFile))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                String[] parts = line.split(":");
-                if (parts.length == 2 && parts[0].equalsIgnoreCase(playerName)) {
-                    return Integer.parseInt(parts[1]);
-                }
-            }
-        } catch (IOException | NumberFormatException ignored) {}
-        return 0;
-    }
-
-    private synchronized void setBalanceInternal(String playerName, int amount) {
-        Map<String, Integer> balances = new HashMap<>();
-        if (ecoFile.exists()) {
-            try (BufferedReader reader = new BufferedReader(new FileReader(ecoFile))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    String[] parts = line.split(":", 2);
-                    if (parts.length == 2) {
-                        balances.put(parts[0], Integer.parseInt(parts[1]));
-                    }
-                }
-            } catch (IOException | NumberFormatException ignored) {}
+        globalLock.lock();
+        try {
+            return balanceCache.getOrDefault(playerName, 0);
+        } finally {
+            globalLock.unlock();
         }
-
-        balances.put(playerName, amount);
-
-        try (PrintWriter writer = new PrintWriter(new FileWriter(ecoFile, false))) {
-            for (Map.Entry<String, Integer> entry : balances.entrySet()) {
-                writer.println(entry.getKey() + ":" + entry.getValue());
-            }
-        } catch (IOException ignored) {}
     }
 
     public void setBalance(String playerName, int amount) {
         int finalAmount = Math.max(0, amount);
-        setBalanceInternal(playerName, finalAmount);
+        globalLock.lock();
+        try {
+            balanceCache.put(playerName, finalAmount);
+            saveBalancesToDisk();
+        } finally {
+            globalLock.unlock();
+        }
         sendBalanceToOtherServers(playerName, finalAmount);
     }
 
     public void addBalance(String playerName, int amount) {
         if (amount <= 0) return;
-        int newBalance = getBalance(playerName) + amount;
-        setBalance(playerName, newBalance);
+        globalLock.lock();
+        try {
+            int newBalance = getBalance(playerName) + amount;
+            setBalance(playerName, newBalance);
+        } finally {
+            globalLock.unlock();
+        }
     }
 
     public boolean removeBalance(String playerName, int amount) {
         if (amount <= 0) return false;
-        int current = getBalance(playerName);
-        if (current < amount) return false;
-        int newBalance = current - amount;
-        setBalance(playerName, newBalance);
+        globalLock.lock();
+        try {
+            int current = getBalance(playerName);
+            if (current < amount) return false;
+            int newBalance = current - amount;
+            setBalance(playerName, newBalance);
+            return true;
+        } finally {
+            globalLock.unlock();
+        }
+    }
+
+    @Override
+    public boolean onCommand(@NotNull CommandSender sender, @NotNull Command command, @NotNull String label, String[] args) {
+        if (!command.getName().equalsIgnoreCase("bust")) return false;
+
+        if (args.length == 0 || args[0].equalsIgnoreCase("balance")) {
+            if (!(sender instanceof Player)) {
+                sender.sendMessage("§cЭту команду могут использовать только игроки!");
+                return true;
+            }
+            Player player = (Player) sender;
+            int balance = getBalance(player.getName());
+            player.sendMessage("§aВаш баланс: §e" + balance + " монет");
+            return true;
+        }
+
+        if (args.length >= 2) {
+            if (args[0].equalsIgnoreCase("join")) {
+                if (!(sender instanceof Player)) {
+                    sender.sendMessage("§cТолько игроки могут перенаправляться между серверами!");
+                    return true;
+                }
+                Player player = (Player) sender;
+                String target = args[1].toLowerCase();
+                if (HARDCODED_SERVERS.containsKey(target)) {
+                    player.sendMessage("§bПеренаправляю на " + target + "...");
+                    InetSocketAddress address = HARDCODED_SERVERS.get(target);
+                    player.transfer(address.getHostString(), address.getPort());
+                } else {
+                    player.sendMessage("§cСервер не найден!");
+                }
+                return true;
+            }
+
+            if (args[0].equalsIgnoreCase("give") && args.length >= 3) {
+                if (!sender.hasPermission("bust.admin")) {
+                    sender.sendMessage("§cУ вас нет прав!");
+                    return true;
+                }
+                String targetName = args[1];
+                if (!NAME_PATTERN.matcher(targetName).matches()) {
+                    sender.sendMessage("§cНеверное имя игрока!");
+                    return true;
+                }
+                int amount;
+                try {
+                    amount = Integer.parseInt(args[2]);
+                } catch (Exception e) {
+                    sender.sendMessage("§cНеверная сумма!");
+                    return true;
+                }
+                if (amount <= 0) {
+                    sender.sendMessage("§cСумма должна быть больше нуля!");
+                    return true;
+                }
+
+                addBalance(targetName, amount);
+                sender.sendMessage("§aВы выдали " + amount + " монет игроку §e" + targetName + "§a!");
+                return true;
+            }
+
+            if (args[0].equalsIgnoreCase("take") && args.length >= 3) {
+                if (!sender.hasPermission("bust.admin")) {
+                    sender.sendMessage("§cУ вас нет прав!");
+                    return true;
+                }
+                String targetName = args[1];
+                if (!NAME_PATTERN.matcher(targetName).matches()) {
+                    sender.sendMessage("§cНеверное имя игрока!");
+                    return true;
+                }
+                int amount;
+                try {
+                    amount = Integer.parseInt(args[2]);
+                } catch (Exception e) {
+                    sender.sendMessage("§cНеверная сумма!");
+                    return true;
+                }
+                if (amount <= 0) {
+                    sender.sendMessage("§cСумма должна быть больше нуля!");
+                    return true;
+                }
+
+                boolean success = removeBalance(targetName, amount);
+                if (!success) {
+                    sender.sendMessage("§cУ игрока недостаточно средств!");
+                    return true;
+                }
+                int newBal = getBalance(targetName);
+                sender.sendMessage("§aВы забрали " + amount + " у игрока §e" + targetName + "§a. Остаток: " + newBal);
+                return true;
+            }
+        }
+
+        sender.sendMessage("§cИспользование: /bust [balance|join|give|take] ...");
         return true;
     }
 
     @Override
-    public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        if (!(sender instanceof Player)) return true;
-        Player player = (Player) sender;
-
-        if (command.getName().equalsIgnoreCase("bust")) {
-            if (args.length == 0 || args[0].equalsIgnoreCase("balance")) {
-                int balance = getBalance(player.getName());
-                player.sendMessage("§aВаш баланс: §e" + balance + " монет");
-                return true;
-            }
-
-            if (args.length >= 2) {
-                if (args[0].equalsIgnoreCase("join")) {
-                    String target = args[1].toLowerCase();
-                    if (servers.containsKey(target)) {
-                        player.sendMessage("§bПеренаправляю на " + target + "...");
-                        InetSocketAddress address = servers.get(target);
-                        player.transfer(address.getHostString(), address.getPort());
-                    } else {
-                        player.sendMessage("§cСервер не найден!");
-                    }
-                    return true;
-                }
-
-                if (args[0].equalsIgnoreCase("pay") && args.length >= 3) {
-                    String targetServer = args[1].toLowerCase();
-                    int amount;
-                    try {
-                        amount = Integer.parseInt(args[2]);
-                    } catch (Exception e) {
-                        player.sendMessage("§cНеверная сумма!");
-                        return true;
-                    }
-
-                    if (amount <= 0) {
-                        player.sendMessage("§cСумма должна быть больше нуля!");
-                        return true;
-                    }
-
-                    if (!servers.containsKey(targetServer)) {
-                        player.sendMessage("§cТакого сервера не существует!");
-                        return true;
-                    }
-
-                    if (!removeBalance(player.getName(), amount)) {
-                        player.sendMessage("§cУ вас недостаточно средств! Баланс: " + getBalance(player.getName()));
-                        return true;
-                    }
-
-                    player.sendMessage("§aВы успешно перевели " + amount + " на сервер §e" + targetServer + "§a!");
-                    return true;
-                }
-
-                if (args[0].equalsIgnoreCase("take") && args.length >= 3) {
-                    if (!player.hasPermission("bost.admin")) {
-                        player.sendMessage("§cУ вас нет прав!");
-                        return true;
-                    }
-                    String targetName = args[1];
-                    int amount;
-                    try {
-                        amount = Integer.parseInt(args[2]);
-                    } catch (Exception e) {
-                        player.sendMessage("§cНеверная сумма!");
-                        return true;
-                    }
-
-                    int current = getBalance(targetName);
-                    int newBal = Math.max(0, current - amount);
-                    setBalance(targetName, newBal);
-                    player.sendMessage("§aВы забрали " + amount + " у игрока §e" + targetName + "§a. Остаток: " + newBal);
-                    return true;
-                }
-            }
-
-            player.sendMessage("§cИспользование: /bust [balance|join|pay|take] ...");
-            return true;
-        }
-
-        return false;
-    }
-
-    @Override
-    public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+    public List<String> onTabComplete(@NotNull CommandSender sender, @NotNull Command command, @NotNull String alias, String[] args) {
         if (command.getName().equalsIgnoreCase("bust")) {
             if (args.length == 1) {
-                return Arrays.asList("balance", "join", "pay", "take");
+                return Arrays.asList("balance", "join", "give", "take");
             }
             if (args.length == 2) {
-                if (args[0].equalsIgnoreCase("join") || args[0].equalsIgnoreCase("pay")) {
-                    return servers.keySet().stream()
+                if (args[0].equalsIgnoreCase("join")) {
+                    return HARDCODED_SERVERS.keySet().stream()
                             .filter(s -> s.startsWith(args[1].toLowerCase()))
                             .collect(Collectors.toList());
                 }
@@ -264,7 +434,7 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
 
         @Override
         public @NotNull String getIdentifier() {
-            return "bost";
+            return "bust";
         }
 
         @Override
@@ -274,7 +444,7 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
 
         @Override
         public @NotNull String getVersion() {
-            return "1.0";
+            return "1.8";
         }
 
         @Override
