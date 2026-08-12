@@ -1,0 +1,8 @@
+name: BostPlugin
+version: 1.2
+main: com.bost.plugin.BostPlugin
+api-version: "1.19"
+commands:
+  bust:
+    description: Bost Network Gateway
+    usage: /bust <join|server> [amount]
