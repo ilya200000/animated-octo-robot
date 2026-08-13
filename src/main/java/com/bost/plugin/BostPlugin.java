@@ -51,7 +51,7 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
     // =========================================================================
 
     // Кем себя считает этот конкретный сервер (поменяй на "survival", "grief" и т.д. перед компиляцией)
-    private static final String CURRENT_SERVER_NAME = "lobby";
+    private static final String CURRENT_SERVER_NAME = "SMP";
 
     private final ConcurrentHashMap<String, Integer> balanceCache = new ConcurrentHashMap<>();
     private final ReentrantLock globalLock = new ReentrantLock();
@@ -344,33 +344,6 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
                 return true;
             }
 
-            if (args[0].equalsIgnoreCase("give") && args.length >= 3) {
-                if (!sender.hasPermission("bust.admin")) {
-                    sender.sendMessage("§cУ вас нет прав!");
-                    return true;
-                }
-                String targetName = args[1];
-                if (!NAME_PATTERN.matcher(targetName).matches()) {
-                    sender.sendMessage("§cНеверное имя игрока!");
-                    return true;
-                }
-                int amount;
-                try {
-                    amount = Integer.parseInt(args[2]);
-                } catch (Exception e) {
-                    sender.sendMessage("§cНеверная сумма!");
-                    return true;
-                }
-                if (amount <= 0) {
-                    sender.sendMessage("§cСумма должна быть больше нуля!");
-                    return true;
-                }
-
-                addBalance(targetName, amount);
-                sender.sendMessage("§aВы выдали " + amount + " монет игроку §e" + targetName + "§a!");
-                return true;
-            }
-
             if (args[0].equalsIgnoreCase("take") && args.length >= 3) {
                 if (!sender.hasPermission("bust.admin")) {
                     sender.sendMessage("§cУ вас нет прав!");
@@ -404,7 +377,7 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
             }
         }
 
-        sender.sendMessage("§cИспользование: /bust [balance|join|give|take] ...");
+        sender.sendMessage("§cИспользование: /bust [balance|join|take] ...");
         return true;
     }
 
@@ -412,7 +385,7 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
     public List<String> onTabComplete(@NotNull CommandSender sender, @NotNull Command command, @NotNull String alias, String[] args) {
         if (command.getName().equalsIgnoreCase("bust")) {
             if (args.length == 1) {
-                return Arrays.asList("balance", "join", "give", "take");
+                return Arrays.asList("balance", "join", "take");
             }
             if (args.length == 2) {
                 if (args[0].equalsIgnoreCase("join")) {
