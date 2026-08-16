@@ -34,8 +34,8 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
     // ЖЕСТКО ЗАШИТЫЕ 5 СЕРВЕРОВ СЕТИ (lobby, survival и 3 дополнительных)
     // =========================================================================
     private static final Map<String, InetSocketAddress> HARDCODED_SERVERS = Map.of(
-            "lobby", new InetSocketAddress("bustmc.ru", 25565),
-            "SMP", new InetSocketAddress("ast.altyn.games", 55104),
+            "lobby", new InetSocketAddress("localhost", 15545),
+            "SMP", new InetSocketAddress("ast.altyn.games", 15544),
             "grief", new InetSocketAddress("localhost", 25567),
             "minigames", new InetSocketAddress("localhost", 25568),
             "creative", new InetSocketAddress("localhost", 25569)
