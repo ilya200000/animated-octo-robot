@@ -51,7 +51,7 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
     // =========================================================================
 
     // Кем себя считает этот конкретный сервер (поменяй на "survival", "grief" и т.д. перед компиляцией)
-    private static final String CURRENT_SERVER_NAME = "SMP";
+    private static final String CURRENT_SERVER_NAME = "lobby";
 
     private final ConcurrentHashMap<String, Integer> balanceCache = new ConcurrentHashMap<>();
     private final ReentrantLock globalLock = new ReentrantLock();
