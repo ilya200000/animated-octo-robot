@@ -22,6 +22,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.nio.file.AtomicMoveNotSupportedException;
 
 public class BostPlugin extends JavaPlugin implements TabCompleter {
 
