@@ -35,7 +35,7 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
     // =========================================================================
     private static final Map<String, InetSocketAddress> HARDCODED_SERVERS = Map.of(
             "lobby", new InetSocketAddress("localhost", 15545),
-            "SMP", new InetSocketAddress("ast.altyn.games", 15544),
+            "SMP", new InetSocketAddress("localhost", 15544),
             "grief", new InetSocketAddress("localhost", 25567),
             "minigames", new InetSocketAddress("localhost", 25568),
             "creative", new InetSocketAddress("localhost", 25569)
@@ -51,7 +51,7 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
     // =========================================================================
 
     // Кем себя считает этот конкретный сервер (поменяй на "survival", "grief" и т.д. перед компиляцией)
-    private static final String CURRENT_SERVER_NAME = "lobby";
+    private static final String CURRENT_SERVER_NAME = "SMP";
 
     private final ConcurrentHashMap<String, Integer> balanceCache = new ConcurrentHashMap<>();
     private final ReentrantLock globalLock = new ReentrantLock();
