@@ -43,7 +43,7 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
 
     private static final Map<String, Integer> HARDCODED_SYNC_PORTS = Map.of(
             "lobby", 16544,
-            "survival", 16545,
+            "SMP", 16545,
             "grief", 16546,
             "minigames", 16547,
             "creative", 16548
