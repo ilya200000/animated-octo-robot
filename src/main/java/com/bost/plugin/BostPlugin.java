@@ -80,7 +80,7 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
     // "creative"
     // =========================================================================
 
-    private static final String CURRENT_SERVER_NAME = "lobby";
+    private static final String CURRENT_SERVER_NAME = "smp";
 
     // =========================================================================
     // ЭКОНОМИКА
